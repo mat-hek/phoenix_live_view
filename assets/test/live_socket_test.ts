@@ -305,6 +305,66 @@ describe("LiveSocket", () => {
     expect(liveSocket.getViewByEl(container(1)).destroy).toBeDefined();
   });
 
+  // destroy() completes asynchronously and reports through its callback
+  const destroySocket = (socket, callback) =>
+    new Promise<void>((resolve) =>
+      socket.destroy(() => {
+        callback();
+        resolve();
+      }),
+    );
+
+  test("destroy leaves its views, releases its listeners and cannot reconnect", async () => {
+    const destroyed = jest.fn();
+    const callback = jest.fn();
+    liveSocket = new LiveSocket("/live", Socket, {
+      hooks: { Probe: { destroyed } },
+    });
+    const el = liveViewDOM();
+    const view = simulateJoinedView(el, liveSocket);
+    view.onJoin({
+      rendered: {
+        s: ['<div id="probe" phx-hook="Probe"></div>'],
+        fingerprint: 123,
+      },
+      liveview_version,
+    });
+    liveSocket.bindTopLevelEvents();
+    const disconnect = jest.spyOn(liveSocket, "disconnect");
+    const clickAway = jest.spyOn(liveSocket, "dispatchClickAway");
+    document.body.click();
+    expect(clickAway).toHaveBeenCalledTimes(1);
+
+    await destroySocket(liveSocket, callback);
+
+    expect(destroyed).toHaveBeenCalledTimes(1);
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(liveSocket.roots).toEqual({});
+    // the root's element stays keyable for whoever patches around it
+    expect(DOM.isPhxDestroyed(el)).toBe(false);
+    // page events no longer reach the destroyed socket
+    document.body.click();
+    expect(clickAway).toHaveBeenCalledTimes(1);
+    expect(() => liveSocket.connect()).toThrow("destroyed");
+    // idempotent
+    await destroySocket(liveSocket, callback);
+    expect(callback).toHaveBeenCalledTimes(2);
+    expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  test("destroy destroys the Phoenix Socket when it supports it", async () => {
+    const callback = jest.fn();
+    liveSocket = new LiveSocket("/live", Socket);
+    const socketDestroy = jest.fn((cb) => cb());
+    liveSocket.socket.destroy = socketDestroy;
+
+    await destroySocket(liveSocket, callback);
+
+    expect(socketDestroy).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
+
   describe("sticky roots of another LiveSocket", () => {
     const stickyHTML =
       '<div id="sticky" data-phx-sticky="" data-phx-session="s" data-app="other"></div>';
@@ -324,13 +384,11 @@ describe("LiveSocket", () => {
         viewSelector: "[data-app=other]",
       });
       // connected with no roots yet, as far as root discovery is concerned
-      other.connect();
       other.isConnected = () => true;
     });
 
     afterEach(() => {
-      other.destroyAllViews();
-      other.disconnect();
+      other.destroy();
     });
 
     test("are joined by their socket when a patch renders them", () => {
@@ -364,9 +422,9 @@ describe("LiveSocket", () => {
       expect(other.roots["sticky"]).toBe(stickyView);
     });
 
-    test("are not offered to a disconnected socket", () => {
+    test("are not offered to a destroyed socket", () => {
       const joinRootViews = jest.spyOn(other, "joinRootViews");
-      other.disconnect();
+      other.destroy();
 
       view.update({ s: [stickyHTML] }, []);
 

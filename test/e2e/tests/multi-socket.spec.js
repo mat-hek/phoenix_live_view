@@ -101,6 +101,95 @@ test("form input is dispatched only to the owning socket", async ({ page }) => {
   await expect(outside(page).locator("[data-role=text]")).toBeEmpty();
 });
 
+const destroyEmbedded = (page) =>
+  page.evaluate(
+    () => new Promise((resolve) => window.embeddedLiveSocket.destroy(resolve)),
+  );
+
+test("destroy leaves the socket's views and lets a fresh socket take them over", async ({
+  page,
+}) => {
+  await connectAll(page);
+
+  await nested(page).locator("[data-role=click]").click();
+  await syncLV(page);
+  await expect(nested(page).locator("[data-role=clicks]")).toHaveText("1");
+
+  await destroyEmbedded(page);
+
+  // both embedded roots left and ran their hooks' destroyed callbacks
+  expect(await page.evaluate(() => window.probeDestroyed)).toBe(3);
+  expect(
+    await page.evaluate(() => Object.keys(window.embeddedLiveSocket.roots)),
+  ).toEqual([]);
+  expect(
+    await page.evaluate(() => window.embeddedLiveSocket.isConnected()),
+  ).toBe(false);
+  expect(
+    await page.evaluate(() => {
+      try {
+        window.embeddedLiveSocket.connect();
+        return null;
+      } catch (e) {
+        return e.message;
+      }
+    }),
+  ).toContain("destroyed");
+
+  // the destroyed socket no longer handles events; the main one still does
+  await nested(page).locator("[data-role=click]").click();
+  await page.locator("#main-click").click();
+  await syncLV(page);
+  await expect(page.locator("#main-clicks")).toHaveText("1");
+  await expect(nested(page).locator("[data-role=clicks]")).toHaveText("1");
+
+  // a new socket joins the same roots (fresh server state) and drives them
+  await page.evaluate(() => window.bootEmbedded());
+  await expect(nested(page).locator("[data-role=clicks]")).toHaveText("0");
+  await expect(outside(page).locator("[data-role=clicks]")).toHaveText("0");
+  await nested(page).locator("[data-role=click]").click();
+  await syncLV(page);
+  await expect(nested(page).locator("[data-role=clicks]")).toHaveText("1");
+  await expect(page.locator("#main-clicks")).toHaveText("1");
+});
+
+test("destroy releases the window listeners the socket installed", async ({
+  page,
+  browserName,
+}) => {
+  test.skip(browserName !== "chromium", "listener inspection needs CDP");
+  await connectAll(page);
+
+  // the Phoenix Socket itself registers page lifecycle listeners in its
+  // constructor and offers no way to remove them — those are not LiveView's
+  // to release
+  const phoenixSocketEvents = ["pagehide", "pageshow", "visibilitychange"];
+  const cdp = await page.context().newCDPSession(page);
+  const windowListeners = async () => {
+    const { result } = await cdp.send("Runtime.evaluate", {
+      expression: "window",
+    });
+    const { listeners } = await cdp.send("DOMDebugger.getEventListeners", {
+      objectId: result.objectId,
+    });
+    return listeners.filter((l) => !phoenixSocketEvents.includes(l.type))
+      .length;
+  };
+
+  const withBoth = await windowListeners();
+  await destroyEmbedded(page);
+  const mainOnly = await windowListeners();
+  expect(mainOnly).toBeLessThan(withBoth);
+
+  // re-creating the socket brings its listeners back, destroying it again
+  // releases exactly those
+  await page.evaluate(() => window.bootEmbedded());
+  await expect(nested(page).locator("[data-role=clicks]")).toHaveText("0");
+  expect(await windowListeners()).toBe(withBoth);
+  await destroyEmbedded(page);
+  expect(await windowListeners()).toBe(mainOnly);
+});
+
 // Live navigation is driven by the main socket; the sticky root belongs to
 // the embedded one. LiveView carries stickies over to the new page and lets
 // the next patch of the main view reconcile them with what the page renders.

@@ -1899,6 +1899,16 @@ describe("View Hooks", function () {
     expect(values).toEqual(["destroyed"]);
   });
 
+  test("destroying a root does not mark its element destroyed", () => {
+    const liveSocket = new LiveSocket("/live", Socket);
+    const el = liveViewDOM();
+    const view = simulateJoinedView(el, liveSocket);
+
+    view.destroy();
+
+    expect(DOM.isPhxDestroyed(el)).toBe(false);
+  });
+
   test("view reconnected", async () => {
     const values: Array<string> = [];
     const Hooks = {
@@ -2463,11 +2473,14 @@ describe("View + Component", function () {
     view.onJoin({ rendered: joinDiff, liveview_version });
     expect(view.el.innerHTML.trim()).toEqual(childHTML);
     expect(view.getChildById("bar")).toBeDefined();
+    const bar = view.el.querySelector("#bar")!;
 
     view.update(updateDiff, []);
     expect(view.el.innerHTML.trim()).toEqual(newChildHTML);
     expect(view.getChildById("baz")).toBeDefined();
     expect(view.getChildById("bar")).toBeUndefined();
+    // a destroyed child is marked for the parent's patch
+    expect(DOM.isPhxDestroyed(bar)).toBe(true);
   });
 
   describe("undoRefs", () => {

@@ -280,7 +280,13 @@ export default class View {
       }
     };
 
-    DOM.markPhxChildDestroyed(this.el);
+    // The mark tells the parent's patch that the child element it still
+    // sees is dead. A root has no parent patch to inform — and its element
+    // may sit in DOM patched by another LiveSocket, whose morphdom must
+    // keep keying it normally.
+    if (this.parent) {
+      DOM.markPhxChildDestroyed(this.el);
+    }
 
     this.log(
       "destroyed",

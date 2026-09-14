@@ -272,8 +272,8 @@ export interface LiveSocketOptions {
   [key: string]: any;
 }
 
-// every connected LiveSocket on the page, so a patch can tell the others
-// about roots it adds or removes on their behalf
+// every LiveSocket on the page that has not been destroyed, so a patch can
+// tell the others about roots it adds or removes on their behalf
 const liveSockets = new Set<LiveSocket>();
 
 export default class LiveSocket {
@@ -310,6 +310,9 @@ export default class LiveSocket {
   private sessionStorage: Storage;
   private boundTopLevelEvents: boolean;
   private boundEventNames: Set<string>;
+  private listeners: AbortController;
+  private socketOpenRef: string;
+  private destroyed: boolean;
   private blockPhxChangeWhileComposing: boolean;
   private cascadePhxRemoveOnNavigation: boolean;
   private serverCloseRef: string | null;
@@ -414,6 +417,9 @@ export default class LiveSocket {
     this.sessionStorage = opts.sessionStorage || window.sessionStorage;
     this.boundTopLevelEvents = false;
     this.boundEventNames = new Set();
+    this.listeners = new AbortController();
+    this.destroyed = false;
+    liveSockets.add(this);
     this.blockPhxChangeWhileComposing =
       opts.blockPhxChangeWhileComposing || false;
     // TODO: Default to false in LiveView 2.0.
@@ -434,10 +440,14 @@ export default class LiveSocket {
     this.currentHistoryPosition =
       parseInt(this.sessionStorage.getItem(PHX_LV_HISTORY_POSITION) || "0") ||
       0;
-    window.addEventListener("pagehide", (_e) => {
-      this.unloaded = true;
-    });
-    this.socket.onOpen(() => {
+    window.addEventListener(
+      "pagehide",
+      (_e) => {
+        this.unloaded = true;
+      },
+      { signal: this.listeners.signal },
+    );
+    this.socketOpenRef = this.socket.onOpen(() => {
       if (this.isUnloaded()) {
         // reload page if being restored from back/forward cache and browser does not emit "pageshow"
         window.location.reload();
@@ -575,7 +585,9 @@ export default class LiveSocket {
    * Connects to the LiveView server.
    */
   connect(): void {
-    liveSockets.add(this);
+    if (this.destroyed) {
+      throw new Error("cannot connect a destroyed LiveSocket");
+    }
     // enable debug by default if on localhost and not explicitly disabled
     const host = window.location.hostname.toLowerCase();
     if (
@@ -601,7 +613,9 @@ export default class LiveSocket {
     ) {
       doConnect();
     } else {
-      document.addEventListener("DOMContentLoaded", () => doConnect());
+      document.addEventListener("DOMContentLoaded", () => doConnect(), {
+        signal: this.listeners.signal,
+      });
     }
   }
 
@@ -609,7 +623,6 @@ export default class LiveSocket {
    * Disconnects from the LiveView server.
    */
   disconnect(callback?: () => void): void {
-    liveSockets.delete(this);
     this.reloadWithJitterTimer != null &&
       clearTimeout(this.reloadWithJitterTimer);
     // remove the socket close listener to avoid trying to handle
@@ -619,6 +632,52 @@ export default class LiveSocket {
       this.serverCloseRef = null;
     }
     this.socket.disconnect(callback);
+  }
+
+  /**
+   * Destroys the LiveSocket.
+   *
+   * Leaves all views, disconnects from the LiveView server (see {@link disconnect})
+   * and frees all resources claimed by the socket.
+   *
+   * Unlike {@link disconnect}, the LiveSocket cannot be connected again afterwards.
+   */
+  destroy(callback?: () => void): void {
+    this.destroyAsync(callback);
+  }
+
+  /** @internal */
+  async destroyAsync(callback?: () => void): Promise<void> {
+    if (!this.destroyed) {
+      this.destroyed = true;
+      liveSockets.delete(this);
+      this.listeners.abort();
+      this.boundTopLevelEvents = false;
+      this.boundEventNames.clear();
+      this.prevActive = null;
+      this.clickStartedAtTarget = null;
+      this.socket.off([this.socketOpenRef]);
+      const roots = Object.values(this.roots);
+      this.roots = {};
+      this.main = null;
+
+      const promise = (run: (resolve: () => void) => void) =>
+        new Promise<void>(run);
+
+      await Promise.all(
+        roots.map((view) => promise((resolve) => view.destroy(resolve))),
+      );
+      await promise((resolve) => this.disconnect(resolve));
+
+      // Older Phoenix versions don't support destroying the socket
+      const socket = this.socket as Socket & {
+        destroy?: (callback: () => void) => void;
+      };
+      if (socket.destroy) {
+        await promise((resolve) => socket.destroy!(resolve));
+      }
+    }
+    callback && callback();
   }
 
   /**
@@ -1201,7 +1260,9 @@ export default class LiveSocket {
     }
 
     this.boundTopLevelEvents = true;
-    document.body.addEventListener("click", function () {}); // ensure all click events bubble for mobile Safari
+    document.body.addEventListener("click", function () {}, {
+      signal: this.listeners.signal,
+    }); // ensure all click events bubble for mobile Safari
     // page-level concerns belong to the socket driving the main view: the
     // unscoped one, or a scoped one whose roots include it
     const managesPage = !this.viewSelector || !!this.main;
@@ -1219,7 +1280,7 @@ export default class LiveSocket {
             window.location.reload();
           }
         },
-        true,
+        { capture: true, signal: this.listeners.signal },
       );
     }
     if (!dead && managesPage) {
@@ -1516,7 +1577,7 @@ export default class LiveSocket {
           });
         });
       },
-      false,
+      { capture: false, signal: this.listeners.signal },
     );
   }
 
@@ -1568,14 +1629,18 @@ export default class LiveSocket {
       history.scrollRestoration = "manual";
     }
     let scrollTimer: ReturnType<typeof setTimeout> | null = null;
-    window.addEventListener("scroll", (_e) => {
-      scrollTimer != null && clearTimeout(scrollTimer);
-      scrollTimer = setTimeout(() => {
-        Browser.updateCurrentState((state) =>
-          Object.assign(state, { scroll: window.scrollY }),
-        );
-      }, 100);
-    });
+    window.addEventListener(
+      "scroll",
+      (_e) => {
+        scrollTimer != null && clearTimeout(scrollTimer);
+        scrollTimer = setTimeout(() => {
+          Browser.updateCurrentState((state) =>
+            Object.assign(state, { scroll: window.scrollY }),
+          );
+        }, 100);
+      },
+      { signal: this.listeners.signal },
+    );
     window.addEventListener(
       "popstate",
       (event) => {
@@ -1633,7 +1698,7 @@ export default class LiveSocket {
           }
         });
       },
-      false,
+      { capture: false, signal: this.listeners.signal },
     );
     window.addEventListener(
       "click",
@@ -1701,7 +1766,7 @@ export default class LiveSocket {
           execPhxClick();
         });
       },
-      false,
+      { capture: false, signal: this.listeners.signal },
     );
   }
 
@@ -2061,11 +2126,15 @@ export default class LiveSocket {
     ) => void,
   ) {
     this.boundEventNames.add(event);
-    window.addEventListener(event, (e) => {
-      if (!this.silenced) {
-        callback(e as any);
-      }
-    });
+    window.addEventListener(
+      event,
+      (e) => {
+        if (!this.silenced) {
+          callback(e as any);
+        }
+      },
+      { signal: this.listeners.signal },
+    );
   }
 
   /** @internal */

@@ -161,17 +161,21 @@ defmodule Phoenix.LiveViewTest.E2E.MultiSocketLive.Layout do
           ...opts,
           viewSelector: "[data-app=main]",
         });
-        window.embeddedLiveSocket = new LiveSocket("/live", window.Phoenix.Socket, {
-          ...opts,
-          viewSelector: "[data-app=embedded]",
-          hooks: {
-            Probe: {
-              destroyed() {
-                window.probeDestroyed = (window.probeDestroyed || 0) + 1;
+        // the embedded socket gets destroyed and re-created by the tests
+        window.bootEmbedded = () => {
+          window.embeddedLiveSocket = new LiveSocket("/live", window.Phoenix.Socket, {
+            ...opts,
+            viewSelector: "[data-app=embedded]",
+            hooks: {
+              Probe: {
+                destroyed() {
+                  window.probeDestroyed = (window.probeDestroyed || 0) + 1;
+                },
               },
             },
-          },
-        });
+          });
+          window.embeddedLiveSocket.connect();
+        };
         window.mainLiveSocket.connect();
         // model a real embedder: fetch the embedded app's disconnected
         // render, inject it into the slot the host never patches, and only
@@ -180,7 +184,7 @@ defmodule Phoenix.LiveViewTest.E2E.MultiSocketLive.Layout do
         const doc = new DOMParser().parseFromString(await res.text(), "text/html");
         const container = doc.querySelector("[data-app=embedded]");
         document.getElementById("embed-slot").innerHTML = container.outerHTML;
-        window.embeddedLiveSocket.connect();
+        window.bootEmbedded();
       }
     </script>
     {@inner_content}

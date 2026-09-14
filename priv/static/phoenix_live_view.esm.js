@@ -4690,7 +4690,9 @@ var View = class _View {
         this.destroyHook(this.viewHooks[id]);
       }
     };
-    dom_default.markPhxChildDestroyed(this.el);
+    if (this.parent) {
+      dom_default.markPhxChildDestroyed(this.el);
+    }
     this.log(
       "destroyed",
       () => ["the child has been removed from the parent"],
@@ -6714,6 +6716,9 @@ var LiveSocket = class {
     this.sessionStorage = opts.sessionStorage || window.sessionStorage;
     this.boundTopLevelEvents = false;
     this.boundEventNames = /* @__PURE__ */ new Set();
+    this.listeners = new AbortController();
+    this.destroyed = false;
+    liveSockets.add(this);
     this.blockPhxChangeWhileComposing = opts.blockPhxChangeWhileComposing || false;
     this.cascadePhxRemoveOnNavigation = opts.cascadePhxRemoveOnNavigation ?? true;
     this.serverCloseRef = null;
@@ -6729,10 +6734,14 @@ var LiveSocket = class {
     );
     this.transitions = new TransitionSet();
     this.currentHistoryPosition = parseInt(this.sessionStorage.getItem(PHX_LV_HISTORY_POSITION) || "0") || 0;
-    window.addEventListener("pagehide", (_e) => {
-      this.unloaded = true;
-    });
-    this.socket.onOpen(() => {
+    window.addEventListener(
+      "pagehide",
+      (_e) => {
+        this.unloaded = true;
+      },
+      { signal: this.listeners.signal }
+    );
+    this.socketOpenRef = this.socket.onOpen(() => {
       if (this.isUnloaded()) {
         window.location.reload();
       }
@@ -6852,7 +6861,9 @@ var LiveSocket = class {
    * Connects to the LiveView server.
    */
   connect() {
-    liveSockets.add(this);
+    if (this.destroyed) {
+      throw new Error("cannot connect a destroyed LiveSocket");
+    }
     const host = window.location.hostname.toLowerCase();
     if ((host === "localhost" || host.endsWith(".localhost")) && !this.isDebugDisabled()) {
       this.enableDebug();
@@ -6872,20 +6883,58 @@ var LiveSocket = class {
     if (["complete", "loaded", "interactive"].indexOf(document.readyState) >= 0) {
       doConnect();
     } else {
-      document.addEventListener("DOMContentLoaded", () => doConnect());
+      document.addEventListener("DOMContentLoaded", () => doConnect(), {
+        signal: this.listeners.signal
+      });
     }
   }
   /**
    * Disconnects from the LiveView server.
    */
   disconnect(callback) {
-    liveSockets.delete(this);
     this.reloadWithJitterTimer != null && clearTimeout(this.reloadWithJitterTimer);
     if (this.serverCloseRef) {
       this.socket.off([this.serverCloseRef]);
       this.serverCloseRef = null;
     }
     this.socket.disconnect(callback);
+  }
+  /**
+   * Destroys the LiveSocket.
+   *
+   * Leaves all views, disconnects from the LiveView server (see {@link disconnect})
+   * and frees all resources claimed by the socket.
+   *
+   * Unlike {@link disconnect}, the LiveSocket cannot be connected again afterwards.
+   */
+  destroy(callback) {
+    this.destroyAsync(callback);
+  }
+  /** @internal */
+  async destroyAsync(callback) {
+    if (!this.destroyed) {
+      this.destroyed = true;
+      liveSockets.delete(this);
+      this.listeners.abort();
+      this.boundTopLevelEvents = false;
+      this.boundEventNames.clear();
+      this.prevActive = null;
+      this.clickStartedAtTarget = null;
+      this.socket.off([this.socketOpenRef]);
+      const roots = Object.values(this.roots);
+      this.roots = {};
+      this.main = null;
+      const promise = (run) => new Promise(run);
+      await Promise.all(
+        roots.map((view) => promise((resolve) => view.destroy(resolve)))
+      );
+      await promise((resolve) => this.disconnect(resolve));
+      const socket = this.socket;
+      if (socket.destroy) {
+        await promise((resolve) => socket.destroy(resolve));
+      }
+    }
+    callback && callback();
   }
   /**
    * Can be used to replace the transport used by the underlying Phoenix Socket.
@@ -7340,6 +7389,8 @@ var LiveSocket = class {
     }
     this.boundTopLevelEvents = true;
     document.body.addEventListener("click", function() {
+    }, {
+      signal: this.listeners.signal
     });
     const managesPage = !this.viewSelector || !!this.main;
     if (managesPage) {
@@ -7355,7 +7406,7 @@ var LiveSocket = class {
             window.location.reload();
           }
         },
-        true
+        { capture: true, signal: this.listeners.signal }
       );
     }
     if (!dead && managesPage) {
@@ -7591,7 +7642,7 @@ var LiveSocket = class {
           });
         });
       },
-      false
+      { capture: false, signal: this.listeners.signal }
     );
   }
   /** @internal */
@@ -7634,14 +7685,18 @@ var LiveSocket = class {
       history.scrollRestoration = "manual";
     }
     let scrollTimer = null;
-    window.addEventListener("scroll", (_e) => {
-      scrollTimer != null && clearTimeout(scrollTimer);
-      scrollTimer = setTimeout(() => {
-        browser_default.updateCurrentState(
-          (state) => Object.assign(state, { scroll: window.scrollY })
-        );
-      }, 100);
-    });
+    window.addEventListener(
+      "scroll",
+      (_e) => {
+        scrollTimer != null && clearTimeout(scrollTimer);
+        scrollTimer = setTimeout(() => {
+          browser_default.updateCurrentState(
+            (state) => Object.assign(state, { scroll: window.scrollY })
+          );
+        }, 100);
+      },
+      { signal: this.listeners.signal }
+    );
     window.addEventListener(
       "popstate",
       (event) => {
@@ -7685,7 +7740,7 @@ var LiveSocket = class {
           }
         });
       },
-      false
+      { capture: false, signal: this.listeners.signal }
     );
     window.addEventListener(
       "click",
@@ -7744,7 +7799,7 @@ var LiveSocket = class {
           execPhxClick();
         });
       },
-      false
+      { capture: false, signal: this.listeners.signal }
     );
   }
   /** @internal */
@@ -8030,11 +8085,15 @@ var LiveSocket = class {
   /** @internal */
   on(event, callback) {
     this.boundEventNames.add(event);
-    window.addEventListener(event, (e) => {
-      if (!this.silenced) {
-        callback(e);
-      }
-    });
+    window.addEventListener(
+      event,
+      (e) => {
+        if (!this.silenced) {
+          callback(e);
+        }
+      },
+      { signal: this.listeners.signal }
+    );
   }
   /** @internal */
   jsQuerySelectorAll(sourceEl, query, defaultQuery) {
