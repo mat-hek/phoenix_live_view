@@ -655,7 +655,9 @@ export default class DOMPatch {
   private onNodeDiscarded(el) {
     // nested view handling
     if (DOM.isPhxChild(el) || DOM.isPhxSticky(el)) {
-      this.liveSocket.destroyViewByEl(el);
+      // a sticky root may belong to another LiveSocket on the page
+      const owner = DOM.private(el, "view");
+      (owner ? owner.liveSocket : this.liveSocket).destroyViewByEl(el);
     }
     this.trackAfterDiscarded(el);
   }

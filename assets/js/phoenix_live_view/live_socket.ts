@@ -103,9 +103,13 @@ export interface LiveSocketOptions {
    *
    * A scoped LiveSocket only joins matching roots and only handles
    * events belonging to its own views, even when other LiveSockets'
-   * views are nested inside them. Page-level responsibilities such
-   * as navigation and the main view are left to the page's unscoped
-   * LiveSocket.
+   * views are nested inside them. It manages navigation only when its
+   * roots include the main LiveView; the dead view and the main-view
+   * event fallback are left to the page's unscoped LiveSocket.
+   *
+   * Sticky roots rendered for a scoped LiveSocket by another LiveSocket's
+   * views are discovered when they appear, carried across live
+   * navigation, and left when the page drops them.
    *
    * Useful when running multiple LiveSockets on the same page,
    * each connected to a different application.
@@ -267,6 +271,10 @@ export interface LiveSocketOptions {
   /** Allow passthrough of other options to the Phoenix Socket constructor. */
   [key: string]: any;
 }
+
+// every connected LiveSocket on the page, so a patch can tell the others
+// about roots it adds or removes on their behalf
+const liveSockets = new Set<LiveSocket>();
 
 export default class LiveSocket {
   socket: Socket;
@@ -567,6 +575,7 @@ export default class LiveSocket {
    * Connects to the LiveView server.
    */
   connect(): void {
+    liveSockets.add(this);
     // enable debug by default if on localhost and not explicitly disabled
     const host = window.location.hostname.toLowerCase();
     if (
@@ -600,6 +609,7 @@ export default class LiveSocket {
    * Disconnects from the LiveView server.
    */
   disconnect(callback?: () => void): void {
+    liveSockets.delete(this);
     this.reloadWithJitterTimer != null &&
       clearTimeout(this.reloadWithJitterTimer);
     // remove the socket close listener to avoid trying to handle
@@ -912,6 +922,11 @@ export default class LiveSocket {
       ? `:is(${this.viewSelector})${PHX_VIEW_SELECTOR}`
       : PHX_VIEW_SELECTOR;
     DOM.all(document, `${rootSelector}:not([${PHX_PARENT_ID}])`, (rootEl) => {
+      const owner = DOM.private(rootEl, "view");
+      if (owner && owner.liveSocket !== this) {
+        // joined by another LiveSocket on this page
+        return;
+      }
       if (!this.getRootById(rootEl.id)) {
         const view = this.newRootView(rootEl);
         // stickies cannot be mounted at the router and therefore should not
@@ -927,6 +942,28 @@ export default class LiveSocket {
       rootsFound = true;
     });
     return rootsFound;
+  }
+
+  /** @internal */
+  joinRootViewsEverywhere() {
+    this.joinRootViews();
+    this.joinForeignRootViews();
+  }
+
+  // Lets the other, scoped LiveSockets on the page join roots that one of
+  // our patches rendered for them. The page's unscoped LiveSocket keeps its
+  // stock join points and is never rescanned on another socket's behalf.
+  /** @internal */
+  joinForeignRootViews() {
+    liveSockets.forEach((liveSocket) => {
+      if (
+        liveSocket !== this &&
+        liveSocket.viewSelector &&
+        liveSocket.isConnected()
+      ) {
+        liveSocket.joinRootViews();
+      }
+    });
   }
 
   /** @internal */
@@ -981,6 +1018,9 @@ export default class LiveSocket {
           stickies.forEach((el) => newMainEl.appendChild(el));
           this.outgoingMainEl!.replaceWith(newMainEl);
           this.outgoingMainEl = null;
+          // the join patch ran on the detached new main, so other sockets'
+          // roots rendered by the new page are only discoverable now
+          this.joinForeignRootViews();
           callback && callback(linkRef);
           onDone();
         });
@@ -1162,7 +1202,10 @@ export default class LiveSocket {
 
     this.boundTopLevelEvents = true;
     document.body.addEventListener("click", function () {}); // ensure all click events bubble for mobile Safari
-    if (!this.viewSelector) {
+    // page-level concerns belong to the socket driving the main view: the
+    // unscoped one, or a scoped one whose roots include it
+    const managesPage = !this.viewSelector || !!this.main;
+    if (managesPage) {
       window.addEventListener(
         "pageshow",
         (e) => {
@@ -1179,7 +1222,7 @@ export default class LiveSocket {
         true,
       );
     }
-    if (!dead && !this.viewSelector) {
+    if (!dead && managesPage) {
       this.bindNav();
     }
     this.bindClicks();

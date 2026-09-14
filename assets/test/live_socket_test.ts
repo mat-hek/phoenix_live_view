@@ -7,6 +7,7 @@ import {
   ReportingBuffer,
 } from "phoenix_live_view/rendered/buffer";
 import JS from "phoenix_live_view/js";
+import DOM from "phoenix_live_view/dom";
 import View from "phoenix_live_view/view";
 import { version as liveview_version } from "../../package.json";
 import {
@@ -302,6 +303,76 @@ describe("LiveSocket", () => {
     liveSocket.disconnect();
 
     expect(liveSocket.getViewByEl(container(1)).destroy).toBeDefined();
+  });
+
+  describe("sticky roots of another LiveSocket", () => {
+    const stickyHTML =
+      '<div id="sticky" data-phx-sticky="" data-phx-session="s" data-app="other"></div>';
+    let other;
+    let view;
+
+    beforeEach(() => {
+      liveSocket = new LiveSocket("/live", Socket, {
+        viewSelector: "[data-app=host]",
+      });
+      // the host view first: liveViewDOM resets the document, and a socket
+      // connecting afterwards must find no leftover root to adopt
+      const el = liveViewDOM("");
+      el.setAttribute("data-app", "host");
+      view = simulateJoinedView(el, liveSocket);
+      other = new LiveSocket("/live", Socket, {
+        viewSelector: "[data-app=other]",
+      });
+      // connected with no roots yet, as far as root discovery is concerned
+      other.connect();
+      other.isConnected = () => true;
+    });
+
+    afterEach(() => {
+      other.destroyAllViews();
+      other.disconnect();
+    });
+
+    test("are joined by their socket when a patch renders them", () => {
+      view.update({ s: [stickyHTML] }, []);
+
+      expect(Object.keys(other.roots)).toEqual(["sticky"]);
+      expect(liveSocket.getRootById("sticky")).toBeUndefined();
+      expect(DOM.private(document.getElementById("sticky"), "view")).toBe(
+        other.roots["sticky"],
+      );
+    });
+
+    test("are left by their socket when a patch drops them", () => {
+      view.update({ s: [stickyHTML] }, []);
+      const destroy = jest.spyOn(other.roots["sticky"], "destroy");
+
+      view.update({ s: [""] }, []);
+
+      expect(destroy).toHaveBeenCalledTimes(1);
+      expect(other.roots).toEqual({});
+      expect(liveSocket.roots).toEqual({ [view.id]: view });
+    });
+
+    test("are skipped by other sockets' root discovery", () => {
+      view.update({ s: [stickyHTML] }, []);
+      const stickyView = other.roots["sticky"];
+      const everything = new LiveSocket("/live", Socket) as any;
+
+      expect(everything.joinRootViews()).toBe(false);
+      expect(everything.roots).toEqual({});
+      expect(other.roots["sticky"]).toBe(stickyView);
+    });
+
+    test("are not offered to a disconnected socket", () => {
+      const joinRootViews = jest.spyOn(other, "joinRootViews");
+      other.disconnect();
+
+      view.update({ s: [stickyHTML] }, []);
+
+      expect(joinRootViews).not.toHaveBeenCalled();
+      expect(other.roots).toEqual({});
+    });
   });
 
   test("rebinds the server close failsafe after reconnecting", () => {

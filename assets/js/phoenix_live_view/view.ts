@@ -700,7 +700,8 @@ export default class View {
 
     patch.afterPhxChildAdded((el) => {
       if (DOM.isPhxSticky(el)) {
-        this.liveSocket.joinRootViews();
+        // a sticky root may belong to another LiveSocket on the page
+        this.liveSocket.joinRootViewsEverywhere();
       } else {
         phxChildrenAdded = true;
       }

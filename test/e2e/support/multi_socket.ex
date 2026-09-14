@@ -26,6 +26,13 @@ defmodule Phoenix.LiveViewTest.E2E.MultiSocketLive do
     </form>
     <span id="main-text">{@text}</span>
     <div id="embed-slot" phx-update="ignore"></div>
+    <.link id="to-other-with-sticky" navigate="/multi-socket/other?sticky=1">other (with sticky)</.link>
+    <.link id="to-other-without-sticky" navigate="/multi-socket/other">other (without sticky)</.link>
+    {live_render(@socket, Phoenix.LiveViewTest.E2E.MultiSocketLive.EmbeddedLive,
+      id: "sticky-embedded",
+      sticky: true,
+      session: %{"label" => "sticky"}
+    )}
     """
   end
 
@@ -42,6 +49,41 @@ defmodule Phoenix.LiveViewTest.E2E.MultiSocketLive do
 
   def handle_event("text", %{"text" => text}, socket) do
     {:noreply, assign(socket, :text, text)}
+  end
+end
+
+# A second page to live-navigate to. Renders the embedded sticky root only
+# when asked, so navigation can keep, add or drop it.
+defmodule Phoenix.LiveViewTest.E2E.MultiSocketLive.OtherLive do
+  use Phoenix.LiveView, container: {:div, "data-app": "main"}
+
+  def mount(_params, _session, socket) do
+    {:ok, assign(socket, clicks: 0)}
+  end
+
+  def handle_params(params, _uri, socket) do
+    {:noreply, assign(socket, :sticky, params["sticky"] == "1")}
+  end
+
+  def render(assigns) do
+    ~H"""
+    <h1>Other</h1>
+    <button id="other-click" phx-click="inc">other-click</button>
+    <span id="other-clicks">{@clicks}</span>
+    <div id="embed-slot" phx-update="ignore"></div>
+    <.link id="to-main" navigate="/multi-socket">main</.link>
+    <%= if @sticky do %>
+      {live_render(@socket, Phoenix.LiveViewTest.E2E.MultiSocketLive.EmbeddedLive,
+        id: "sticky-embedded",
+        sticky: true,
+        session: %{"label" => "sticky"}
+      )}
+    <% end %>
+    """
+  end
+
+  def handle_event("inc", _params, socket) do
+    {:noreply, update(socket, :clicks, &(&1 + 1))}
   end
 end
 
@@ -78,6 +120,7 @@ defmodule Phoenix.LiveViewTest.E2E.MultiSocketLive.EmbeddedLive do
       <input type="text" name="text" phx-debounce="50" />
     </form>
     <span data-role="text">{@text}</span>
+    <div id={"probe-#{@label}"} phx-hook="Probe"></div>
     """
   end
 
@@ -121,6 +164,13 @@ defmodule Phoenix.LiveViewTest.E2E.MultiSocketLive.Layout do
         window.embeddedLiveSocket = new LiveSocket("/live", window.Phoenix.Socket, {
           ...opts,
           viewSelector: "[data-app=embedded]",
+          hooks: {
+            Probe: {
+              destroyed() {
+                window.probeDestroyed = (window.probeDestroyed || 0) + 1;
+              },
+            },
+          },
         });
         window.mainLiveSocket.connect();
         // model a real embedder: fetch the embedded app's disconnected

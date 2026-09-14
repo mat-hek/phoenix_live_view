@@ -2867,7 +2867,8 @@ var DOMPatch = class {
   }
   onNodeDiscarded(el) {
     if (dom_default.isPhxChild(el) || dom_default.isPhxSticky(el)) {
-      this.liveSocket.destroyViewByEl(el);
+      const owner = dom_default.private(el, "view");
+      (owner ? owner.liveSocket : this.liveSocket).destroyViewByEl(el);
     }
     this.trackAfterDiscarded(el);
   }
@@ -5059,7 +5060,7 @@ var View = class _View {
     });
     patch.afterPhxChildAdded((el) => {
       if (dom_default.isPhxSticky(el)) {
-        this.liveSocket.joinRootViews();
+        this.liveSocket.joinRootViewsEverywhere();
       } else {
         phxChildrenAdded = true;
       }
@@ -6689,6 +6690,7 @@ var View = class _View {
 // js/phoenix_live_view/live_socket.ts
 var BUFFERS = Object.freeze({ RenderingBuffer, ReportingBuffer });
 var isUsedInput = (el) => dom_default.isUsedInput(el);
+var liveSockets = /* @__PURE__ */ new Set();
 var LiveSocket = class {
   /**
    * Creates a new LiveSocket instance.
@@ -6881,6 +6883,7 @@ var LiveSocket = class {
    * Connects to the LiveView server.
    */
   connect() {
+    liveSockets.add(this);
     const host = window.location.hostname.toLowerCase();
     if ((host === "localhost" || host.endsWith(".localhost")) && !this.isDebugDisabled()) {
       this.enableDebug();
@@ -6907,6 +6910,7 @@ var LiveSocket = class {
    * Disconnects from the LiveView server.
    */
   disconnect(callback) {
+    liveSockets.delete(this);
     this.reloadWithJitterTimer != null && clearTimeout(this.reloadWithJitterTimer);
     if (this.serverCloseRef) {
       this.socket.off([this.serverCloseRef]);
@@ -7157,6 +7161,10 @@ var LiveSocket = class {
     let rootsFound = false;
     const rootSelector = this.viewSelector ? `:is(${this.viewSelector})${PHX_VIEW_SELECTOR}` : PHX_VIEW_SELECTOR;
     dom_default.all(document, `${rootSelector}:not([${PHX_PARENT_ID}])`, (rootEl) => {
+      const owner = dom_default.private(rootEl, "view");
+      if (owner && owner.liveSocket !== this) {
+        return;
+      }
       if (!this.getRootById(rootEl.id)) {
         const view = this.newRootView(rootEl);
         if (!dom_default.isPhxSticky(rootEl)) {
@@ -7170,6 +7178,22 @@ var LiveSocket = class {
       rootsFound = true;
     });
     return rootsFound;
+  }
+  /** @internal */
+  joinRootViewsEverywhere() {
+    this.joinRootViews();
+    this.joinForeignRootViews();
+  }
+  // Lets the other, scoped LiveSockets on the page join roots that one of
+  // our patches rendered for them. The page's unscoped LiveSocket keeps its
+  // stock join points and is never rescanned on another socket's behalf.
+  /** @internal */
+  joinForeignRootViews() {
+    liveSockets.forEach((liveSocket) => {
+      if (liveSocket !== this && liveSocket.viewSelector && liveSocket.isConnected()) {
+        liveSocket.joinRootViews();
+      }
+    });
   }
   /** @internal */
   redirect(to, flash, reloadToken) {
@@ -7209,6 +7233,7 @@ var LiveSocket = class {
           stickies.forEach((el) => newMainEl.appendChild(el));
           this.outgoingMainEl.replaceWith(newMainEl);
           this.outgoingMainEl = null;
+          this.joinForeignRootViews();
           callback && callback(linkRef);
           onDone();
         });
@@ -7347,7 +7372,8 @@ var LiveSocket = class {
     this.boundTopLevelEvents = true;
     document.body.addEventListener("click", function() {
     });
-    if (!this.viewSelector) {
+    const managesPage = !this.viewSelector || !!this.main;
+    if (managesPage) {
       window.addEventListener(
         "pageshow",
         (e) => {
@@ -7363,7 +7389,7 @@ var LiveSocket = class {
         true
       );
     }
-    if (!dead && !this.viewSelector) {
+    if (!dead && managesPage) {
       this.bindNav();
     }
     this.bindClicks();

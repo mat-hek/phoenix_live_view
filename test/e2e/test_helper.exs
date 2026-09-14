@@ -272,6 +272,7 @@ defmodule Phoenix.LiveViewTest.E2E.Router do
       pipe_through(:browser)
 
       live "/multi-socket", MultiSocketLive
+      live "/multi-socket/other", MultiSocketLive.OtherLive
     end
   end
 
